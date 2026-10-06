@@ -1,0 +1,91 @@
+name: build | Manual arm64 image build (docker-compose services)
+
+# Manually triggered, arm64-only builds for the two services in docker-compose.yml
+# that are built from source (see `build:` blocks):
+#   - cognee      -> root Dockerfile
+#   - cognee-mcp  -> cognee-mcp/Dockerfile
+#
+# The published multi-arch images (cognee/cognee, cognee/cognee-mcp) are built on
+# push to main by dockerhub.yml / dockerhub-mcp.yml. This workflow exists so a fork
+# (e.g. running on Apple Silicon or an ARM server) can produce arm64 images on
+# demand and push them to GHCR without needing Docker Hub credentials.
+#
+# Usage: Actions -> "Manual arm64 image build" -> Run workflow.
+#   - tag: image tag to push (default "arm64"). A `<tag>-<short-sha>` tag is also
+#     pushed for traceability.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to push (e.g. arm64, latest-arm64, v1.2.3)"
+        required: true
+        default: "arm64"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: cognee
+            context: .
+            dockerfile: Dockerfile
+          - image: cognee-mcp
+            context: .
+            dockerfile: cognee-mcp/Dockerfile
+
+    steps:
+      - name: Check and free disk space before build
+        run: |
+          echo "=== Before cleanup ==="
+          df -h
+          echo "Removing unused preinstalled SDKs to free space..."
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+          docker system prune -af || true
+          echo "=== After cleanup ==="
+          df -h
+
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3.12.0
+        with:
+          buildkitd-flags: --root /tmp/buildkit
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # GHCR image names must be lowercase; e.g. Elendil-Q -> elendil-q.
+      - name: Derive lowercase owner and short SHA
+        id: vars
+        run: |
+          echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+          echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push ${{ matrix.image }} (linux/arm64)
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6.19.2
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ steps.vars.outputs.owner }}/${{ matrix.image }}:${{ inputs.tag }}
+            ghcr.io/${{ steps.vars.outputs.owner }}/${{ matrix.image }}:${{ inputs.tag }}-${{ steps.vars.outputs.sha }}
+          cache-from: type=registry,ref=ghcr.io/${{ steps.vars.outputs.owner }}/${{ matrix.image }}:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ steps.vars.outputs.owner }}/${{ matrix.image }}:buildcache,mode=max
+
+      - name: Image digest
+        run: echo "ghcr.io/${{ steps.vars.outputs.owner }}/${{ matrix.image }}:${{ inputs.tag }} -> ${{ steps.build.outputs.digest }}"
